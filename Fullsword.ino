@@ -364,6 +364,12 @@ void effectTestIMU() {
   static float lastSwing = 0.0f;
   static float hiltFlash = 0.0f;
   static float tipGlow   = 0.0f;  // 0-1: glowing orange-red gradient at tip after fireball
+
+  // Fire state variables (shared between orientation and swing detection)
+  static uint32_t fireStartMs  = 0;
+  static float    fireSpeed    = 0.0f;
+  static bool     fireLive     = false;
+  static float    prevSwingMag = 0.0f;
   
   // Always clear hilt zone by default
   for (int i = 0; i < HILT_LEDS; i++) bladeSet(i, CRGB::Black);
@@ -469,10 +475,6 @@ void effectTestIMU() {
   }
 
   // ── 2. Fireball Rush (chaser-style smooth motion + fire heatmap) ──────────
-  static uint32_t fireStartMs  = 0;
-  static float    fireSpeed    = 0.0f;
-  static bool     fireLive     = false;
-  static float    prevSwingMag = 0.0f;
 
   // PREDICTIVE TRIGGER: fire early when swing is accelerating, not at peak
   // dSwing = rate of change of swingMag per frame
