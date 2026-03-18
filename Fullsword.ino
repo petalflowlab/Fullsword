@@ -280,11 +280,17 @@ void effectTestIMU() {
   static float    fireSpeed    = 0.0f;
   static bool     fireLive     = false;
   static float    prevSwingMag = 0.0f;
-  static bool     fireCharge   = false;  // forward-declare so hierarchy check works
+  static bool     fireCharge   = false;
   static uint32_t chargeStart  = 0;
+  static bool     fireCompressing = false;
+  static uint32_t compressStartMs = 0;
 
-  // fireActive: true from swing trigger all the way through tipGlow fade
-  fireActive = (fireCharge || fireLive);
+  // fireTrail: persistent sparkling trail left behind the fireball
+  static float   fireTrail[BLADE_LENGTH] = {0};
+  static uint8_t trailHue[BLADE_LENGTH]   = {0};
+  static float   trailMax = 0.0f;
+  // fireActive: persist as long as trail has energy
+  fireActive = (fireCharge || fireLive || fireCompressing || trailMax > 0.02f);
 
   // ── Blade base clear ─────────────────────────────────────────────────
   // When fire just triggered, instantly black the whole blade
@@ -426,10 +432,15 @@ void effectTestIMU() {
   bool swingPredict = (swingMag > 30.0f && dSwing > 20.0f);
   bool swingStrong  = (swingMag > 70.0f);
 
-  if ((swingPredict || swingStrong) && !fireLive && !fireCharge) {
+  bool canTrigger = !fireCharge && !fireLive && !fireCompressing;
+  if ((swingPredict && !fireCharge) || (swingStrong && canTrigger)) {
     fireCharge  = true;
     chargeStart = millis();
+    fireLive    = false;
+    fireCompressing = false;
     hiltFlash   = 1.0f;  // bright hilt flash on trigger
+    // Clear trail for a fresh swing priority
+    memset(fireTrail, 0, sizeof(fireTrail));
   }
 
   if (fireCharge && !fireLive && (millis() - chargeStart > CHARGE_MS)) {
@@ -444,7 +455,7 @@ void effectTestIMU() {
 
   // ── CHARGE PHASE: pulsing hilt blast ─────────────────────────────────
   if (fireCharge) {
-    fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::Black);
+    // Redundant clear removed; bladeClear() at start handles it
     float chargeT = (float)(millis() - chargeStart) / (float)CHARGE_MS;
     int chargeWidth = 12 + (int)(chargeT * 8);
     for (int j = 0; j < chargeWidth; j++) {
@@ -479,36 +490,94 @@ void effectTestIMU() {
     pos += (float)HILT_LEDS;
 
     if (pos >= (float)(BLADE_LENGTH - 1)) {
-      for (int s = 0; s < 12; s++) {
-        int sp = BLADE_LENGTH - 1 - random8(18);
-        if (sp >= HILT_LEDS) bladeSet(sp, CHSV(15 + random8(20), 240, random8(180, 255)));
-      }
       fireLive = false;
+      fireCompressing = true;
+      compressStartMs = millis();
     } else {
-      fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::Black);
       int center = (int)pos;
 
       // 30px body: [0-9] yellow core | [10-19] orange | [20-29] red outer
       for (int j = 0; j < 30; j++) {
         int idx = center - j;
         if (idx < HILT_LEDS || idx >= BLADE_LENGTH) continue;
+        CRGB color;
         if (j < 10) {
           // 10px yellow-white core (front of fireball)
           float coreFrac = (float)j / 10.0f;
           float twinkle  = random8(200, 255) / 255.0f;
           uint8_t g = (uint8_t)((1.0f - coreFrac * 0.6f) * 220.0f * twinkle);
-          bladeSet(idx, CRGB(255, g, 0));
+          color = CRGB(255, g, 0);
         } else if (j < 20) {
           // 10px orange mid-band
           float t = (float)(j - 10) / 10.0f;
           float twinkle = random8(180, 255) / 255.0f;
           uint8_t g = (uint8_t)((1.0f - t * 0.75f) * 110.0f * twinkle);
-          bladeSet(idx, CRGB(255, g, 0));
+          color = CRGB(255, g, 0);
         } else {
           // 10px red outer tail
           float t = (float)(j - 20) / 10.0f;
           uint8_t r = (uint8_t)((1.0f - t) * 200.0f);
-          bladeSet(idx, CRGB(r, 0, 0));
+          color = CRGB(r, 0, 0);
+        }
+        
+        if (color) {
+          bladeSet(idx, bladeGet(idx) + color);
+          // Trail energy: always set to max (1.0) while fireball is passing
+          fireTrail[idx] = 1.0f;
+          trailHue[idx]  = (j < 15) ? 32 : 5; // amber core, deep red tail
+        }
+      }
+    }
+  }
+
+  // ── COMPRESSION PHASE: fire smushes into the tip ───────────────────────
+  if (fireCompressing) {
+    float compressT = (float)(millis() - compressStartMs) / 1000.0f; // 1 second compression
+    if (compressT >= 1.0f) {
+      fireCompressing = false;
+    } else {
+      int center = BLADE_LENGTH - 1;
+      int width  = (int)(30.0f * (1.0f - compressT));
+      
+      for (int j = 0; j < width; j++) {
+        int idx = center - j;
+        if (idx < HILT_LEDS) continue;
+        
+        // As width shrinks, the bands compress and merge
+        // T=0: 0-9 yellow, 10-19 orange, 20-29 red
+        // T=0.5: 0-4 yellow, 5-9 orange, 10-14 red
+        float p = (float)j / (float)(width > 0 ? width : 1);
+        CRGB color;
+        if (p < 0.33f) {
+          color = CRGB(255, (uint8_t)(220 * (1.0f - p*3)), 0); // Yellow-ish
+        } else if (p < 0.66f) {
+          float t = (p - 0.33f) * 3.0f;
+          color = CRGB(255, (uint8_t)(110 * (1.0f - t)), 0);   // Orange-ish
+        } else {
+          float t = (p - 0.66f) * 3.0f;
+          color = CRGB((uint8_t)(200 * (1.0f - t)), 0, 0);     // Red-ish
+        }
+        bladeSet(idx, bladeGet(idx) + color);
+      }
+    }
+  }
+
+  // ── TRAIL RENDERING: sparkling disintegration ──────────────────────────
+  trailMax = 0.0f;
+  if (fireActive) {
+    for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
+      if (fireTrail[i] > 0.01f) {
+        // Gradient decay: fizzle faster at hilt (0.94), slower at tip (0.98)
+        float posFrac = (float)(i - HILT_LEDS) / (float)BLADE_PIXELS;
+        fireTrail[i] *= (0.94f + posFrac * 0.04f);
+        if (fireTrail[i] > trailMax) trailMax = fireTrail[i];
+        
+        // High-contrast sparkle
+        float sparkle = 0.35f + (float)random8(165) / 255.0f;
+        uint8_t bri = (uint8_t)(fireTrail[i] * 240.0f * sparkle);
+        if (bri > 5) {
+          uint8_t sat = 210 + random8(45);
+          bladeSet(i, bladeGet(i) + CHSV(trailHue[i], sat, bri));
         }
       }
     }
