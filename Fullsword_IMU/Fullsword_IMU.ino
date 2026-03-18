@@ -274,6 +274,7 @@ void effectTestIMU() {
   static float fizzle = 0.0f;
   static float lastSwing = 0.0f;
   static float hiltFlash = 0.0f;
+  static float tipGlow   = 0.0f;
 
   // ── FIRE HIERARCHY: declare state first so fireActive can be computed ──
   static uint32_t fireStartMs  = 0;
@@ -284,7 +285,7 @@ void effectTestIMU() {
   static uint32_t chargeStart  = 0;
 
   // fireActive: true from swing trigger all the way through tipGlow fade
-  fireActive = (fireCharge || fireLive);
+  fireActive = (fireCharge || fireLive || tipGlow > 0.01f);
 
   // ── Blade base clear ─────────────────────────────────────────────────
   // When fire just triggered, instantly black the whole blade
@@ -436,10 +437,8 @@ void effectTestIMU() {
     fireCharge  = false;
     fireLive    = true;
     fireStartMs = millis();
-    // Targeted for ~1.0s total: 5 * fastMs (fastMs = 200ms)
-    // 200ms = 82.5 / (fireSpeed * 60) -> fireSpeed = 0.006875
-    fireSpeed   = 0.006f + swingMag * 0.00001f;
-    if (fireSpeed > 0.012f) fireSpeed = 0.012f;
+    fireSpeed   = 0.45f + swingMag * 0.001f;
+    if (fireSpeed > 0.75f) fireSpeed = 0.75f;
   }
 
   // ── CHARGE PHASE: pulsing hilt blast ─────────────────────────────────
@@ -484,6 +483,7 @@ void effectTestIMU() {
         if (sp >= HILT_LEDS) bladeSet(sp, CHSV(15 + random8(20), 240, random8(180, 255)));
       }
       fireLive = false;
+      tipGlow  = 1.0f;
     } else {
       fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::Black);
       int center = (int)pos;
@@ -514,6 +514,18 @@ void effectTestIMU() {
     }
   }
 
+  // ── Tip Glow after fireball impact ────────────────────────────────────
+  if (tipGlow > 0.01f) {
+    int glowStart = HILT_LEDS + BLADE_PIXELS / 2;
+    for (int i = glowStart; i < BLADE_LENGTH; i++) {
+      float t = (float)(i - glowStart) / (float)(BLADE_LENGTH - glowStart);
+      bladeSet(i, bladeGet(i) + CHSV((uint8_t)((1.0f - t) * 18.0f), 230 + (uint8_t)(t * 25),
+                                      (uint8_t)(tipGlow * (200.0f + t * 55.0f))));
+    }
+    if (tipGlow < 0.6f && random8() < (uint8_t)(tipGlow * 50.0f))
+      bladeSet(glowStart + random16(BLADE_PIXELS/2), CHSV(10, 220, random8(80,180)));
+    tipGlow *= 0.975f;
+  }
 
   // ── 3. Thrust / Pull also triggers fireball ────────────────────────────
   static float prevAY = 0.0f;
