@@ -65,11 +65,13 @@ CRGB leds[NUM_LEDS];
 // ─── IMU STATE ────────────────────────────────────────────────────────
 bool   imuOk     = false;
 float  swingMag  = 0.0f;   // filtered transverse gyro magnitude (deg/s)
+float  currSwing = 0.0f;   // raw transverse gyro magnitude (deg/s)
 float  twistRate = 0.0f;   // filtered axial gyro gz (deg/s)
 float  accelX    = 0.0f;
 float  accelY    = 0.0f;
 float  accelZ    = 0.0f;
-int8_t tiltDir   =  1;     // +1 = tip-up; -1 = tip-down
+float  gx = 0.0f, gy = 0.0f, gz = 0.0f;
+int8_t tiltDir   =  1;
 
 // ─── EFFECTS STATE ────────────────────────────────────────────────────
 uint8_t  effectMode   = 0;     // Always 0 (TestIMU) in this slim build
@@ -236,13 +238,13 @@ void updateIMU() {
   accelY = imuRead16(0x3D) / 16384.0f;
   accelZ = imuRead16(0x3F) / 16384.0f;
 
-  float gx = imuRead16(0x43) / 65.5f;
-  float gy = imuRead16(0x45) / 65.5f;
-  float gz = imuRead16(0x47) / 65.5f;
+  gx = imuRead16(0x43) / 65.5f;
+  gy = imuRead16(0x45) / 65.5f;
+  gz = imuRead16(0x47) / 65.5f;
 
-  float swing = sqrtf(gx*gx + gy*gy);
-  swingMag  = swingMag  * 0.8f + swing * 0.2f;
-  twistRate = twistRate * 0.8f + gz    * 0.2f;
+  currSwing = sqrtf(gx*gx + gy*gy);
+  swingMag  = swingMag  * 0.55f + currSwing * 0.45f; // Much faster response for "flicks"
+  twistRate = twistRate * 0.70f + gz    * 0.30f;
 
   if      (accelZ >  0.2f) tiltDir =  1;
   else if (accelZ < -0.2f) tiltDir = -1;
@@ -284,19 +286,32 @@ void effectTestIMU() {
   static uint32_t chargeStart  = 0;
   static bool     fireCompressing = false;
   static uint32_t compressStartMs = 0;
+  static float    lavaIntensity   = 0.0f;
+  static uint32_t stopFlashMs     = 0;
+  static uint32_t diagStopMs      = 0;  // DIAGNOSTIC blue flash
+  static uint32_t diagFadeMs      = 0;  // DIAGNOSTIC purple flash
+  static float    lastLavaInt     = 0.0f; 
 
-  // fireTrail: persistent sparkling trail left behind the fireball
   static float   fireTrail[BLADE_LENGTH] = {0};
   static uint8_t trailHue[BLADE_LENGTH]   = {0};
-  static float   trailMax = 0.0f;
-  // fireActive: persist as long as trail has energy
-  fireActive = (fireCharge || fireLive || fireCompressing || trailMax > 0.02f);
+  static float   trailMaxHalf = 0.0f;
+  
+  // ── LAVA STATE: moved to top for trigger access ────────────────
+  static float lava[BLADE_LENGTH] = {};
+  static float lavaPhase    = 0.0f;
+  static float hbPhase      = 0.0f; // heartbeat phase
+  static float shimmerPhase = 0.0f; // heat shimmer phase
 
-  // ── Blade base clear ─────────────────────────────────────────────────
-  // When fire just triggered, instantly black the whole blade
-  if (fireActive) {
+  // ── Strike Phases: Block background only during high-priority live/charge ──
+  bool strikeBlocking = fireCharge || fireLive;
+  bool fizzleActive   = fireCompressing || (trailMaxHalf > 0.01f);
+  fireActive          = strikeBlocking || fizzleActive;
+
+  // ── Blade clearance: Only clear the full blade during the blocking phase ──
+  if (strikeBlocking) {
     bladeClear();
   } else {
+    // Standard hilt clear for idle/fizzle
     for (int i = 0; i < HILT_LEDS; i++) bladeSet(i, CRGB::Black);
   }
 
@@ -307,139 +322,196 @@ void effectTestIMU() {
       uint8_t bri = (uint8_t)(hiltFlash * 220.0f);
       CRGB hiltColor;
       if (fabsf(twistRate) > 300.0f) hiltColor = CRGB::White;
-      else if (accelY < -0.4f)       hiltColor = CRGB(bri, bri/4, 0);
-      else                            hiltColor = CRGB(0, bri/2, bri);
+      else if (accelY < -0.4f)       hiltColor = CRGB(bri, bri/4, 0); // Orange pointing up
+      else                            hiltColor = CRGB(bri, bri, bri/2); // Gold-ish white for standard swing
       for (int i = 0; i < HILT_LEDS; i++) bladeSet(i, hiltColor);
       hiltFlash *= 0.80f;
     }
   } else {
-    hiltFlash = 0.0f;  // reset so hilt doesn't linger after fire exits
+    hiltFlash = 0.0f;  
+    // Only reset if it's not already in a negative "strike delay" phase
+    if (lavaIntensity > 0.0f) lavaIntensity = 0.0f; 
   }
 
-  // ── 1. Orientation & Twist — SKIPPED while fire is active ────────────
-  bool twisting = (!fireActive) && (fabsf(twistRate) > 600.0f);
+  // ── DIAGNOSTIC HILT FLASHES: Blue (Stop) and Purple (Fade-in) ──────────
+  if (diagStopMs && (millis() - diagStopMs < 300)) {
+    float t = (float)(millis() - diagStopMs) / 300.0f;
+    uint8_t bri = (uint8_t)((1.0f - t) * 255.0f);
+    for (int i = 0; i < HILT_LEDS; i++) bladeSet(i, CRGB(0, 0, bri));
+  } else if (diagFadeMs && (millis() - diagFadeMs < 300)) {
+    float t = (float)(millis() - diagFadeMs) / 300.0f;
+    uint8_t bri = (uint8_t)((1.0f - t) * 255.0f);
+    for (int i = 0; i < HILT_LEDS; i++) bladeSet(i, CRGB(bri, 0, bri));
+  }
 
-  if (!fireActive && twisting) {
+  // ── 1. Orientation & Twist — SKIPPED while strike is blocking ────────
+  bool twisting = (!strikeBlocking) && (fabsf(twistRate) > 600.0f);
+
+  if (!strikeBlocking && twisting) {
     if ((millis() / 30) % 2) fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::White);
     else                      fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::Black);
-  } else if (!fireActive) {
-    if (accelY < -0.4f) {
-      // Sword Pointing UP — Slow melting lava heat diffusion
-      // Heat buffer persists between frames; hilt is source, tip is cooler.
-      static float lava[BLADE_LENGTH] = {};  // heat per pixel: 0.0=cool, 1.0=white-hot
-      static float lavaPhase = 0.0f;         // slowly drifting noise phase
+  } else if (!strikeBlocking) {
+      // High-energy fizzle-in: starts at 40% and fills in 4 frames
+      lavaIntensity = fminf(1.0f, lavaIntensity + 0.15f);
+      if (lastLavaInt <= 0.0f && lavaIntensity > 0.0f) {
+        diagFadeMs = millis();
+      }
+      lastLavaInt = lavaIntensity;
 
-      lavaPhase += 0.012f;  // Very slow drift for organic texture
+      float drawIntensity = fmaxf(0.0f, lavaIntensity);
 
+      // Dynamic sway metric: combines hilt tilt and rotation speed
+      float sway = (fabsf(gx) + fabsf(gy) + fabsf(gz)) * 0.0001f;
+      lavaPhase    += 0.022f + sway * 2.0f; 
+      hbPhase      += 0.008f; 
+      shimmerPhase += 0.065f; // fast shimmer
+
+      // ── Heartbeat modulation: pulsing life ──────────────────────────
+      // hb travels from 0.0 (red/inhale) to 1.0 (yellow/exhale)
+      float hb = 0.5f + 0.5f * sinf(hbPhase); 
+      
       // ── Step 1: Inject heat at the hilt (source) ─────────────────────
-      // The hilt bubbles with pulsing heat — slow sine makes it breathe
-      float hiltHeat = 0.75f + 0.25f * sinf(lavaPhase * 1.3f);
+      // Heartbeat drives the pulse intensity
+      float hiltHeat = (0.55f + 0.45f * hb) + fminf(sway * 5.0f, 0.2f);
       for (int i = HILT_LEDS; i < HILT_LEDS + 8; i++) {
         float fade = 1.0f - (float)(i - HILT_LEDS) / 8.0f;
         lava[i] = fmaxf(lava[i], hiltHeat * fade);
       }
 
       // ── Step 2: Diffuse heat upward (tip direction) with mild cooling──
-      // Each pixel bleeds heat into the next, biased toward rising.
-      // Hilt-side pixels cool faster (natural convection model).
+      // Cooling is more aggressive when heartbeat is low (inhaling heat)
       for (int i = BLADE_LENGTH - 1; i > HILT_LEDS; i--) {
-        float pos = (float)(i - HILT_LEDS) / BLADE_PIXELS; // 0=hilt, 1=tip
-        float coolRate = 0.993f - pos * 0.006f; // hilt cools slightly faster
-        // Blend with neighbor below (heat rises)
-        lava[i] = lava[i] * coolRate + lava[i - 1] * 0.018f;
-        // Add slow organic wobble so colors blob and merge
-        lava[i] += 0.015f * sinf(lavaPhase * 2.1f + (float)i * 0.18f) * (1.0f - pos);
+        float pos = (float)(i - HILT_LEDS) / BLADE_PIXELS;
+        // Base cooling is now 0.982 (slightly faster than before)
+        // Pulsing cooling prevents heat accumulation
+        float coolRate = (0.978f - pos * 0.015f) + (hb * 0.010f); 
+        float diffusionBias = 0.040f + fminf(sway * 0.1f, 0.05f);
+        
+        lava[i] = lava[i] * coolRate + lava[i - 1] * diffusionBias;
+        
+        // Wobble frequency and amplitude scale with sway
+        float wobbleAmp = 0.015f + sway * 0.4f + swingMag * 0.0001f;
+        lava[i] += wobbleAmp * sinf(lavaPhase * 2.1f + (float)i * (0.18f + sway));
         lava[i] = constrain(lava[i], 0.0f, 1.0f);
       }
 
-      // ── Step 3: Render heat → lava palette ───────────────────────────
-      // Heat maps to a deep red/orange/yellow gradient that blends smoothly.
-      // Low heat  = dark crimson / deep red
-      // Mid heat  = rich orange / amber
-      // High heat = bright amber / yellow-white core
-      for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
-        float h = lava[i];
-        // Add per-pixel flicker so it feels alive and molten
-        float flicker = 0.92f + 0.08f * sinf(lavaPhase * 4.7f + (float)i * 0.31f);
-        h *= flicker;
-        h = constrain(h, 0.0f, 1.0f);
+        // ── Step 3: Render heat → lava palette ───────────────────────────
+        float pulseR = 0.88f + 0.12f * sinf(shimmerPhase * 0.70f);
+        float pulseO = 0.86f + 0.14f * sinf(shimmerPhase * 1.20f + 1.0f);
+        float pulseY = 0.84f + 0.16f * sinf(shimmerPhase * 1.80f + 2.0f);
 
-        CRGB color;
-        if (h < 0.35f) {
-          // Deep crimson / dark lava crust
-          uint8_t r = (uint8_t)(h / 0.35f * 160);
-          color = CRGB(r, 0, 0);
-        } else if (h < 0.60f) {
-          // Rich red blending into orange
-          float t  = (h - 0.35f) / 0.25f;
-          uint8_t r = 160 + (uint8_t)(t * 75);
-          uint8_t g = (uint8_t)(t * t * 55);
-          color = CRGB(r, g, 0);
-        } else if (h < 0.82f) {
-          // Bright orange — the heart of the lava
-          float t  = (h - 0.60f) / 0.22f;
-          uint8_t r = 235 + (uint8_t)(t * 20);
-          uint8_t g = 55  + (uint8_t)(t * 85);
-          color = CRGB(r, g, 0);
-        } else {
-          // Yellow-white hot core (rare, hilt center only)
-          float t  = (h - 0.82f) / 0.18f;
-          uint8_t r = 255;
-          uint8_t g = 140 + (uint8_t)(t * 115);
-          uint8_t b = (uint8_t)(t * 80);
-          color = CRGB(r, g, b);
+        for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
+          float h = lava[i];
+          // Heat Shimmer: uneven, multi-frequency brightness pulse
+          float shimmer = 0.86f + 0.14f * (sinf(shimmerPhase) * sinf(shimmerPhase * 0.43f));
+          float flicker = 0.90f + 0.10f * sinf(lavaPhase * 4.7f + (float)i * 0.31f);
+          h *= (flicker * shimmer);
+          h = constrain(h, 0.0f, 1.0f);
+
+          CRGB color;
+          if (h < 0.55f) {
+            // Bright Red (expanded range)
+            uint8_t r = (uint8_t)(fminf(1.0f, h / 0.55f + 0.2f) * 200 * pulseR);
+            color = CRGB(r, 0, 0);
+          } else if (h < 0.80f) {
+            // Deep Orange-Red
+            float t  = (h - 0.55f) / 0.25f;
+            uint8_t r = (uint8_t)((180 + t * 65) * pulseO);
+            uint8_t g = (uint8_t)((t * t * 45) * pulseO);
+            color = CRGB(r, g, 0);
+          } else if (h < 0.90f) {
+            // Hot Orange
+            float t  = (h - 0.80f) / 0.10f;
+            uint8_t r = (uint8_t)((245 + t * 10) * pulseO);
+            uint8_t g = (uint8_t)((45  + t * 85) * pulseO);
+            color = CRGB(r, g, 0);
+          } else {
+            // Yellow only on extreme peaks
+            float t  = (h - 0.90f) / 0.10f;
+            uint8_t r = (uint8_t)(255 * pulseY);
+            uint8_t g = (uint8_t)((130 + t * 125) * pulseY);
+            uint8_t b = (uint8_t)((t * 70) * pulseY);
+            color = CRGB(r, g, b);
+          }
+        
+        // Stochastic Fizzle Mask: pixels pop in at full brightness
+        if (random8() > (uint8_t)(lavaIntensity * 255.0f)) {
+           bladeSet(i, CRGB::Black);
+           continue;
         }
+
+        // Apply smooth but FAST fade-in to the pixels that ARE showing
+        color.nscale8((uint8_t)(fmaxf(0.5f, lavaIntensity) * 255.0f));
         bladeSet(i, color);
       }
 
       // ── Step 4: Occasional glowing ember spark ────────────────────────
       if (random8() < 8) {
-        int pos = HILT_LEDS + random16(BLADE_PIXELS / 2); // sparks mostly near hilt
+        int pos = HILT_LEDS + random16(BLADE_PIXELS / 2);
         bladeSet(pos, bladeGet(pos) + CRGB(random8(30, 80), random8(5, 20), 0));
       }
-
-    } else if (accelY > 0.4f) {
-      // Sword Pointing DOWN — white chaser
-      fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::Black);
-      int p = ((millis() / 15) % BLADE_PIXELS) + HILT_LEDS;
-      for (int j = 0; j < 15; j++) {
-        int idx = p - j;
-        if (idx >= HILT_LEDS && idx < BLADE_LENGTH) bladeSet(idx, CHSV(0, 0, 255 - j * 16));
-      }
-    } else {
-      // Sword Flat / Horizontal — blue lightning
-      fill_solid(leds + 4 + HILT_LEDS, BLADE_PIXELS, CRGB::Black);
-      int p = ((millis() / 8) % BLADE_PIXELS) + HILT_LEDS;
-      for (int j = 0; j < 20; j++) {
-        int idx = p - j;
-        if (idx >= HILT_LEDS && idx < BLADE_LENGTH) {
-          if      (j < 3) bladeSet(idx, CRGB::White);
-          else if (j < 8) bladeSet(idx, CHSV(160, 150, 255 - j*10));
-          else             bladeSet(idx, CHSV(160, 255, 200 - j*8));
-        }
-      }
-      if (random8() < 20) bladeSet(HILT_LEDS + random16(BLADE_PIXELS), CRGB(100, 200, 255));
     }
-  }
 
   // ── 2. Swing Fireball — charge blast at hilt → 2-phase launch ──────────
   // fireCharge / fireLive / chargeStart already declared above for hierarchy.
   #define CHARGE_MS 120
 
+  // ── SENSOR CALCULATION ──────────────────────────────────────────────
+  static uint32_t lastTriggerMs = 0;
   float dSwing = swingMag - prevSwingMag;
   prevSwingMag = swingMag;
 
-  bool swingPredict = (swingMag > 30.0f && dSwing > 20.0f);
-  bool swingStrong  = (swingMag > 70.0f);
+  // ── SUDDEN STOP DETECTION: High sensitivity ──────────────────────────
+  static uint32_t lastStopDetectMs = 0;
+  // Refined: Aggressive jerk detection (dSwing < -15) and raw speed check (currSwing < 40)
+  if (swingMag > 50.0f && dSwing < -15.0f && (currSwing < 40.0f) && (millis() - lastStopDetectMs > 500)) {
+    stopFlashMs     = millis();
+    diagStopMs      = millis();
+    lastStopDetectMs = millis();
+    lastTriggerMs    = millis() + 450; // Block accidental swing re-trigger
+    
+    // RECOVERY SEQUENCE START: IMMEDIATE + PRE-WARM
+    lavaIntensity   = 0.4f; // START FIRING IMMEDIATELY
+    lastLavaInt     = 0.0f;
+    
+    // Pop-in base heat across the whole blade to ensure immediate glow
+    for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
+       lava[i] = (float)random8(20, 60) / 100.0f; 
+    }
+    
+    // Instant Recovery: Kill all fire animations
+    fireCharge      = false;
+    fireLive        = false;
+    fireCompressing = false;
+    memset(fireTrail, 0, sizeof(fireTrail));
+  }
 
-  bool canTrigger = !fireCharge && !fireLive && !fireCompressing;
-  if ((swingPredict && !fireCharge) || (swingStrong && canTrigger)) {
+  // ── FIRE HILT-CHARGE: Start a new strike ──────────────────────────
+
+  // Reduced jerk threshold (25.0) to catch mid-swing pumps
+  bool swingPredict = (swingMag > 90.0f && dSwing > 25.0f);
+  bool swingStrong  = (swingMag > 260.0f);
+
+  // canRetrigger: fireball is either finished or in trail-fade
+  bool animateDone = !fireCharge && !fireLive && !fireCompressing;
+  
+  // jerkResets: sudden "flick" always resets (except during the 120ms charge)
+  // strongRetriggers: sustained swing fires again after 350ms cooldown
+  if ((swingPredict && !fireCharge) || (swingStrong && animateDone && (millis() - lastTriggerMs > 350))) {
+    // GLOBAL RESET: Purge all active effects immediately for a fresh strike
+    lastTriggerMs = millis();
     fireCharge  = true;
     chargeStart = millis();
     fireLive    = false;
     fireCompressing = false;
-    hiltFlash   = 1.0f;  // bright hilt flash on trigger
-    // Clear trail for a fresh swing priority
+    trailMaxHalf  = 0.0f;
+    lavaIntensity = 0.4f;    // START FIRING IMMEDIATELY
+    lastLavaInt   = 0.0f;    // Reset for recovery
+    hiltFlash     = 1.0f;
+    // Pop-in base heat across the whole blade
+    for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
+       lava[i] = (float)random8(20, 60) / 100.0f; 
+    }
     memset(fireTrail, 0, sizeof(fireTrail));
   }
 
@@ -490,7 +562,7 @@ void effectTestIMU() {
     pos += (float)HILT_LEDS;
 
     if (pos >= (float)(BLADE_LENGTH - 1)) {
-      fireLive = false;
+      fireLive        = false;
       fireCompressing = true;
       compressStartMs = millis();
     } else {
@@ -521,7 +593,7 @@ void effectTestIMU() {
         }
         
         if (color) {
-          bladeSet(idx, bladeGet(idx) + color);
+          bladeSet(idx, color); // Fireball OVERWRITES background for punchy core
           // Trail energy: always set to max (1.0) while fireball is passing
           fireTrail[idx] = 1.0f;
           trailHue[idx]  = (j < 15) ? 32 : 5; // amber core, deep red tail
@@ -532,8 +604,8 @@ void effectTestIMU() {
 
   // ── COMPRESSION PHASE: fire smushes into the tip ───────────────────────
   if (fireCompressing) {
-    float compressT = (float)(millis() - compressStartMs) / 1000.0f; // 1 second compression
-    if (compressT >= 1.0f) {
+    float compressT = (float)(millis() - compressStartMs) / 500.0f; // 500ms compression
+    if (millis() - compressStartMs > 500) {
       fireCompressing = false;
     } else {
       int center = BLADE_LENGTH - 1;
@@ -563,14 +635,27 @@ void effectTestIMU() {
   }
 
   // ── TRAIL RENDERING: sparkling disintegration ──────────────────────────
-  trailMax = 0.0f;
+  // NEW: Hard-limit trail to EXACTLY 0.5s after fireball hits or stop occurs
+  if (fireActive && !strikeBlocking && (millis() - compressStartMs > 500)) {
+     memset(fireTrail, 0, sizeof(fireTrail));
+  }
+  
+  trailMaxHalf = 0.0f;
   if (fireActive) {
     for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
       if (fireTrail[i] > 0.01f) {
-        // Gradient decay: fizzle faster at hilt (0.94), slower at tip (0.98)
+        // Accelerated decay (vanish within ~1.5s)
         float posFrac = (float)(i - HILT_LEDS) / (float)BLADE_PIXELS;
-        fireTrail[i] *= (0.94f + posFrac * 0.04f);
-        if (fireTrail[i] > trailMax) trailMax = fireTrail[i];
+        float decayRate = (0.84f + posFrac * 0.10f);
+        if (swingMag < 60.0f || fireTrail[i] < 0.70f) { // Drop priority if swing is low or trail is weak
+          decayRate *= 0.85f; // Make it decay faster
+        }
+        fireTrail[i] *= decayRate;
+        
+        // Track energy specifically for the first half (for early exit)
+        if (i < (HILT_LEDS + BLADE_PIXELS / 2)) {
+          if (fireTrail[i] > trailMaxHalf) trailMaxHalf = fireTrail[i];
+        }
         
         // High-contrast sparkle
         float sparkle = 0.35f + (float)random8(165) / 255.0f;
@@ -595,7 +680,56 @@ void effectTestIMU() {
     hiltFlash   = 1.0f;
   }
 
-  // ── 4. Quick Stop & Fade ──────────────────────────────────────────────
+  // ── 4. PERMANENT HILT/BASE FIRE: always visible ──────────────────────
+  // This renders 12 pixels of core bubbling fire at the base
+  {
+    static float hiltPhase = 0.0f;
+    hiltPhase += 0.035f;
+    for (int j = 0; j < 12; j++) {
+      int idx = HILT_LEDS + j;
+      if (idx >= BLADE_LENGTH) break;
+      float falloff = 1.0f - (float)j / 12.0f;
+      float pulse = 0.85f + 0.15f * sinf(hiltPhase + (float)j*0.4f);
+      float twinkle = random8(200, 255) / 255.0f;
+      
+      CRGB hiltColor;
+      if (j < 4) {
+        hiltColor = CRGB(255, (uint8_t)(200 * falloff * pulse * twinkle), 0);
+      } else {
+        hiltColor = CRGB((uint8_t)(255 * falloff * pulse), (uint8_t)(60 * falloff * falloff), 0);
+      }
+      
+      // Blend OVER existing base color
+      CRGB existing = bladeGet(idx);
+      bladeSet(idx, existing.lerp8(hiltColor, (uint8_t)(falloff * 255)));
+    }
+  }
+
+  // ── 5. SUDDEN STOP FLASH: High-Visibility center-out pulse ───────────
+  uint32_t stopAge = millis() - stopFlashMs;
+  if (stopAge < 250) {
+    float t = (float)stopAge / 250.0f;
+    int center = HILT_LEDS + BLADE_PIXELS/2;
+    float radius = t * (BLADE_PIXELS / 2 + 15);
+    float width = 14.0f * (1.0f - t); 
+    
+    for (int i = HILT_LEDS; i < BLADE_LENGTH; i++) {
+      float dist = fabsf((float)(i - center) - radius);
+      float dist2 = fabsf((float)(i - center) + radius);
+      float proximity = fminf(dist, dist2);
+      
+      if (proximity < width) {
+        float intensity = (1.0f - proximity / width) * (1.0f - t);
+        // Ultra-High-Intensity Additive White
+        CRGB flashColor = CRGB(255, 255, 255); 
+        CRGB current = bladeGet(i);
+        // Additive blend with saturation
+        bladeSet(i, current + flashColor.nscale8((uint8_t)(intensity * 255.0f)));
+      }
+    }
+  }
+
+  // ── 6. Quick Stop & Fade ──────────────────────────────────────────────
   if (lastSwing > 180.0f && swingMag < 80.0f) fizzle = 1.0f;
   if (fizzle > 0.01f) {
     for (int i = 0; i < BLADE_LENGTH; i++) {
