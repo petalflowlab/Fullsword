@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "brainsync": {
+      "command": "node",
+      "args": [
+        "c:\\Users\\Admin\\.antigravity\\extensions\\dawoodahmad.brainsync-2.2.5-universal\\dist\\mcp-server.js",
+        "--db",
+        "C:\\Users\\Admin\\.brainsync\\fullsword\\memory.db"
+      ],
+      "type": "stdio",
+      "env": {
+        "NEMOTRON_API_KEY": "",
+        "NEMOTRON_ENDPOINT": "https://api.ollama.com",
+        "NEMOTRON_MODEL": "nemotron-3-super:cloud"
+      }
+    }
+  }
+}

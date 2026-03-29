@@ -1,0 +1,25 @@
+{
+  "cpp": {
+    "enabled": true,
+    "lastGenerated": "2026-03-29T01:31:11.758Z",
+    "observationCount": 6,
+    "skillCount": 0,
+    "domain": "cpp",
+    "triggerGlobs": [
+      "**/*.cpp",
+      "**/*.h"
+    ],
+    "description": "Cpp for Fullsword. 1 conventions, 1 fixes."
+  },
+  "project": {
+    "enabled": true,
+    "lastGenerated": "2026-03-29T01:31:11.757Z",
+    "observationCount": 56,
+    "skillCount": 0,
+    "domain": "project",
+    "triggerGlobs": [
+      "**/*"
+    ],
+    "description": "Project for Fullsword. 19 gotchas, 28 conventions."
+  }
+}

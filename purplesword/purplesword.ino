@@ -1,6 +1,6 @@
 
 // =====================================================================
-// Fullsword.ino — Multi-Mode Sword Controller
+// purplesword.ino — Multi-Mode Purple Sword Controller
 // =====================================================================
 //
 // Modes (single-click cycles):
@@ -8,21 +8,26 @@
 //   1 = Rainbow     — Paint splashes that mush & mix hilt→tip
 //   2 = Lightning   — Blue storm rush + lightning strike on stop
 //
-// LED layout (184 total):
-//   leds[0..3]   = Accent LEDs (base of strip)
-//   leds[4..183] = Blade (hilt→tip in bladeSet/bladeGet coordinates)
+// PHYSICAL LED LAYOUT — Single Folded Strip (86 total, blade only):
+//
+//   One strip folded at the tip creates two blade faces.
+//   Side A: leds[0]  (hilt) → leds[42] (tip)   — strip runs hilt→tip
+//   Side B: leds[43] (tip)  → leds[85] (hilt)  — strip runs tip→hilt
+//
+//   bladeSet(pos, color) maps virtual pos (0–179) to physical (0–42)
+//   and mirrors to both sides simultaneously.
 //
 // Button (D3): Click = next mode | Hold > 0.5s = Boost | Triple+Hold = Sync
-// OTA hostname: Fullsword  |  OTA password: sword
+// OTA hostname: PurpleSword  |  OTA password: sword
 // =====================================================================
 
 #include "Config.h"
 
 // ─── GLOBAL VARIABLE DEFINITIONS ──────────────────────────────────────
 const char* ssid        = "CGN3-4400";
-const char* wifiPass    = "251148015432";
-const char* hostname    = "Fullsword";
-const char* otaPassword = "sword";
+const char* password    = "251148015432";
+const char* hostname    = "PurpleSword";
+const char* otaHash   = "f3b462d93b24cb0538f5d864546bc3e0"; // MD5 hash of "sword"
 WebServer   server(80);
 
 bool     otaActive   = false;
@@ -196,101 +201,18 @@ void updateIMU() {
 // OVERLAYS
 // =====================================================================
 
-void renderAccents() {
-  float pulse = (sinf((float)millis() * 0.002f) + 1.0f) * 0.5f;
-  uint8_t bri = (uint8_t)(pulse * 150.0f + 50.0f);
-  CRGB accentColor = CHSV(baseHue + 20, 200, bri);
-  leds[0] = leds[1] = leds[2] = leds[3] = accentColor;
-}
+
 
 void updateAndRenderRollOverlay() {
   float gyroZ_abs = fabsf(twistRate);
-  static float dominantFade = 0.0f;
-  static uint8_t dominantHue = 0;
-  const float dt = 0.016f;
-
   if (gyroZ_abs > 30.0f) {
-    if (dominantFade <= 0.0f) dominantHue = (uint8_t)(millis() * 0.1f);
-    dominantFade = constrain(dominantFade + dt * 4.0f, 0.0f, 2.0f);
-
-    // ── Hilt Strobe (Special Area: bladePos 0..HILT_LEDS-1) ────────────
-    if (gyroZ_abs > 100.0f) {
-      bool strobeOn = (millis() % 40 < 20); // 25Hz strobe
-      for (int i = 0; i < HILT_LEDS; i++) {
-        if (strobeOn) {
-          CRGB color;
-          switch (currentMode) {
-            case MODE_LIGHTNING:
-              color = (random8() < 140) ? CRGB::White : CRGB::Blue;
-              break;
-            case MODE_FIRE:
-              {
-                uint8_t r = random8();
-                if (r < 30) color = CRGB(40, 80, 255); // flicker blue
-                else if (r < 150) color = CRGB(255, 40, 0); // red-orange
-                else color = CRGB(255, 120, 0); // orange
-              }
-              break;
-            case MODE_RAINBOW:
-              // Sequence of pastels
-              color = CHSV((uint8_t)(millis() >> 1) + i * 12, 110, 255);
-              break;
-            default: color = CRGB::White; break;
-          }
-          bladeSet(i, color);
-        } else {
-          bladeSet(i, CRGB::Black);
-        }
-      }
-    }
-
-    // ── Rest of the blade (Original Spark Effect) ──────────────────────
     rollPhase += (twistRate * 0.005f);
     int numSparks = constrain((int)(gyroZ_abs / 20.0f), 1, 8);
     for (int i = 0; i < numSparks; i++) {
-      int target = random(HILT_LEDS, BLADE_LENGTH); 
+      int target = random(0, BLADE_LENGTH);
       float shift = sinf(rollPhase + (target * 0.1f)) + 1.0f;
       CRGB sparkColor = CHSV(baseHue + (twistRate > 0 ? 30 : -30), 120, (uint8_t)(shift * 127.0f));
       bladeSet(target, bladeGet(target) + sparkColor);
-    }
-  } else {
-    dominantFade = constrain(dominantFade - dt * 2.0f, 0.0f, 2.0f);
-  }
-
-  // ── "Just After Hilt" Roll Strobe (First 8 Blade LEDs) ──
-  if (dominantFade > 0.0f) {
-    int baseLeds = 8;
-    float str = constrain(dominantFade / 2.0f, 0.0f, 1.0f);
-    
-    for (int i = 0; i < baseLeds; i++) {
-      int idx = HILT_LEDS + i;
-      if (idx >= BLADE_LENGTH) break;
-      
-      float dist = (float)i / (float)baseLeds;
-      float hill = (1.0f - dist * dist) * str; // Quadratic falloff
-
-      CRGB povColor;
-      uint8_t dVal = (uint8_t)constrain(80.0f + hill * 175.0f, 0.0f, 255.0f);
-      uint8_t blendAmt = (uint8_t)(hill * 200.0f);
-
-      if (currentMode == MODE_RAINBOW) {
-        // Rainbow mode: Dominant Hue Hill
-        uint8_t dHue = (uint8_t)(dominantHue + dist * 50.0f);
-        povColor = CHSV(dHue, 255, dVal);
-      } else if (currentMode == MODE_FIRE) {
-        // Fire mode: Sharp orange/red flicker
-        uint8_t fg = (uint8_t)(100.0f * (1.0f - dist));
-        povColor = CRGB(255, fg, 0).nscale8(dVal);
-      } else if (currentMode == MODE_LIGHTNING) {
-        // Lightning mode: Intense white/blue flash
-        uint8_t r = (uint8_t)(80.0f * (1.0f - dist));
-        uint8_t g = (uint8_t)(180.0f * (1.0f - dist));
-        povColor = CRGB(r, g, 255).nscale8(dVal);
-      } else {
-        povColor = CRGB(dVal, dVal, dVal); // Fallback
-      }
-
-      bladeSet(idx, bladeGet(idx).lerp8(povColor, blendAmt));
     }
   }
 }
@@ -362,12 +284,7 @@ void renderSyncSearching() {
     bladeSet(i, CHSV((((i + off) / 10) % 2) ? 192 : 0, 255, val));
 }
 
-void renderSyncIndicator() {
-  float   pulse = (sinf((float)millis() * 0.004f) + 1.0f) * 0.5f;
-  uint8_t bri   = (uint8_t)(pulse * 70.0f + 15.0f);
-  leds[0]            += CRGB(0, bri, bri);
-  leds[NUM_LEDS - 1] += CRGB(0, bri, bri);
-}
+
 
 
 // =====================================================================
@@ -378,8 +295,12 @@ void renderOTAMode() {
   static bool     blinkState = false;
   static uint32_t lastBlink  = 0;
   if (millis() - lastBlink > 300) { blinkState = !blinkState; lastBlink = millis(); }
-  FastLED.clear();
-  for (int i = 0; i < NUM_LEDS; i += 5) if (blinkState) leds[i] = CRGB(0, 0, 150);
+  bladeClear();
+  // Blink every ~5 virtual positions so both sides see the pattern
+  if (blinkState) {
+    for (int i = 0; i < BLADE_LENGTH; i += 5) bladeSet(i, CRGB(0, 0, 150));
+  }
+  // OTA progress fill — mirrors onto both sides via bladeSet
   int filled = (otaProgress * BLADE_LENGTH) / 100;
   for (int i = 0; i < filled; i++) bladeSet(i, CRGB(0, 100, 255));
   FastLED.show();
@@ -459,7 +380,7 @@ void handleSetMode() {
 void setupWiFiOTA() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(hostname);
-  WiFi.begin(ssid, wifiPass);
+  WiFi.begin(ssid, password);
   unsigned long t = millis();
   while (WiFi.status() != WL_CONNECTED && millis()-t < 10000) delay(100);
   if (WiFi.status() == WL_CONNECTED) {
@@ -470,7 +391,7 @@ void setupWiFiOTA() {
     server.begin();
   }
   ArduinoOTA.setHostname(hostname);
-  ArduinoOTA.setPassword(otaPassword);
+  ArduinoOTA.setPasswordHash(otaHash);
   ArduinoOTA.onStart([]()     { otaActive = true; otaProgress = 0; Serial.println("OTA Start"); });
   ArduinoOTA.onProgress([](unsigned int p, unsigned int tot) { otaProgress = (p*100)/tot; });
   ArduinoOTA.onEnd([]()       { Serial.println("OTA End"); });
@@ -679,9 +600,7 @@ void loop() {
     FastLED.setBrightness(BRIGHTNESS);
   }
 
-  if (syncEnabled) renderSyncIndicator();
   if (!syncSearching && !fireActive) updateAndRenderImpacts();
-  renderAccents();
 
   // ── POV overlay — world-locked pattern when swinging hard ──────────
   if (!syncSearching && !syncAnimating)
