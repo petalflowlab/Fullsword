@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "brainsync": {
+      "command": "node",
+      "args": [
+        "c:\\Users\\Admin\\.antigravity\\extensions\\dawoodahmad.brainsync-3.0.5-universal\\dist\\mcp-server.js",
+        "--db",
+        "C:\\Users\\Admin\\.brainsync\\fullsword\\state.dat"
+      ],
+      "type": "stdio",
+      "env": {
+        "BRAINSYNC_ENV_FILE": "C:\\Users\\Admin\\.brainsync\\fullsword\\mcp-secret-env.json"
+      }
+    }
+  }
+}
